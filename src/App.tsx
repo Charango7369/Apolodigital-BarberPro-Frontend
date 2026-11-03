@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { api } from './services/api';
+import { api, setAuthToken } from './services/api';
 import {
   Service,
   Barber,
@@ -7,7 +7,10 @@ import {
   Appointment,
   Sale,
   DashboardMetrics,
-  AppointmentStatus
+  AppointmentStatus,
+  User,
+  UserRole,
+  CashShift
 } from './types';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
@@ -23,6 +26,19 @@ import { AppointmentModal } from './components/AppointmentModal';
 export const App: React.FC = () => {
   const [viewMode, setViewMode] = useState<'admin' | 'client'>('admin');
   const [currentTab, setCurrentTab] = useState<string>('agenda');
+
+  // Authentication & RBAC User State
+  const [currentUser, setCurrentUser] = useState<User>({
+    id: 'usr-admin-01',
+    email: 'admin@apolodigital.lat',
+    full_name: 'Admin Recepción',
+    role: 'admin',
+    tenant_id: 'org_apolo_sopocachi',
+  });
+
+  // Cash Shifts (Arqueo Ciego)
+  const [currentShift, setCurrentShift] = useState<CashShift | null>(null);
+  const [isShiftOpen, setIsShiftOpen] = useState<boolean>(true);
 
   // Core Data
   const [services, setServices] = useState<Service[]>([]);
@@ -49,20 +65,33 @@ export const App: React.FC = () => {
   const loadInitialData = async () => {
     try {
       setIsLoading(true);
-      const [srvs, brbs, clts, apts, sls, mtr] = await Promise.all([
+
+      // Auto login as default admin for smooth immediate session
+      try {
+        const loginRes = await api.login('admin@apolodigital.lat', 'Apolo2026!');
+        setCurrentUser(loginRes.user);
+      } catch (loginErr) {
+        console.warn('Fallback: continuing without re-login');
+      }
+
+      const [srvs, brbs, clts, apts, sls, mtr, shiftData] = await Promise.all([
         api.getServices(),
         api.getBarbers(),
         api.getClients(),
         api.getAppointments(selectedDate),
         api.getSales(selectedDate),
         api.getDashboardMetrics(selectedDate),
+        api.getCurrentShift().catch(() => ({ is_open: false, shift: null })),
       ]);
+
       setServices(srvs);
       setBarbers(brbs);
       setClients(clts);
       setAppointments(apts);
       setSales(sls);
       setMetrics(mtr);
+      setIsShiftOpen(shiftData.is_open);
+      setCurrentShift(shiftData.shift);
     } catch (err) {
       console.error('Error loading data from backend:', err);
     } finally {
@@ -93,6 +122,55 @@ export const App: React.FC = () => {
     refreshDateData();
   }, [selectedDate]);
 
+  // Switch User Role (Auditoría OWASP)
+  const handleSwitchUserRole = async (role: UserRole) => {
+    let email = 'admin@apolodigital.lat';
+    if (role === 'owner') email = 'dueno@apolodigital.lat';
+    if (role === 'barber') email = 'alex@apolodigital.lat';
+    if (role === 'client') email = 'cliente@apolodigital.lat';
+
+    try {
+      setIsLoading(true);
+      const res = await api.login(email, 'Apolo2026!');
+      setCurrentUser(res.user);
+
+      // Si es barbero, preseleccionar su sillón
+      if (res.user.role === 'barber' && res.user.barber_id) {
+        setSelectedBarberId(res.user.barber_id);
+      } else {
+        setSelectedBarberId('all');
+      }
+
+      // Refrescar datos con el contexto del nuevo rol
+      const [apts, sls, mtr] = await Promise.all([
+        api.getAppointments(selectedDate),
+        api.getSales(selectedDate),
+        api.getDashboardMetrics(selectedDate),
+      ]);
+      setAppointments(apts);
+      setSales(sls);
+      setMetrics(mtr);
+    } catch (err) {
+      console.error('Error switching user role:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Cash Shifts Handlers
+  const handleOpenShift = async (initialCash: number, notes?: string) => {
+    const res = await api.openCashShift(initialCash, notes);
+    setIsShiftOpen(true);
+    setCurrentShift(res.shift);
+  };
+
+  const handleCloseShift = async (actualCounted: number, notes?: string) => {
+    const res = await api.closeCashShift(actualCounted, notes);
+    setIsShiftOpen(false);
+    setCurrentShift(res.shift);
+    return { verdict: res.verdict, difference: res.difference };
+  };
+
   // Handlers for Appointments
   const handleStatusChange = async (id: string, status: AppointmentStatus) => {
     try {
@@ -105,9 +183,9 @@ export const App: React.FC = () => {
       setAppointments(apts);
       setMetrics(mtr);
       setClients(clts);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error updating status:', err);
-      alert('Error al actualizar el estado de la cita.');
+      alert(err.message || 'Error al actualizar el estado de la cita.');
     }
   };
 
@@ -120,8 +198,9 @@ export const App: React.FC = () => {
       ]);
       setAppointments(apts);
       setMetrics(mtr);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error deleting appointment:', err);
+      alert(err.message || 'Error al cancelar la cita.');
     }
   };
 
@@ -151,16 +230,18 @@ export const App: React.FC = () => {
   // Handlers for Checkout / Sales
   const handleProcessCheckout = async (checkoutData: any): Promise<Sale> => {
     const sale = await api.processCheckout(checkoutData);
-    const [apts, sls, mtr, clts] = await Promise.all([
+    const [apts, sls, mtr, clts, shiftData] = await Promise.all([
       api.getAppointments(selectedDate),
       api.getSales(selectedDate),
       api.getDashboardMetrics(selectedDate),
       api.getClients(),
+      api.getCurrentShift().catch(() => ({ is_open: true, shift: null })),
     ]);
     setAppointments(apts);
     setSales(sls);
     setMetrics(mtr);
     setClients(clts);
+    if (shiftData.shift) setCurrentShift(shiftData.shift);
     return sale;
   };
 
@@ -218,7 +299,6 @@ export const App: React.FC = () => {
   // Handler for Client Booking Portal
   const handleClientBooking = async (aptData: Partial<Appointment>): Promise<Appointment> => {
     const res = await api.createAppointment(aptData);
-    // Refresh admin data
     const [apts, clts, mtr] = await Promise.all([
       api.getAppointments(selectedDate),
       api.getClients(),
@@ -236,7 +316,9 @@ export const App: React.FC = () => {
       <Navbar
         currentTab={currentTab}
         viewMode={viewMode}
+        currentUser={currentUser}
         setViewMode={setViewMode}
+        onSwitchUserRole={handleSwitchUserRole}
         onOpenNewAppointment={() => {
           setSlotTimeForModal('10:00');
           setSlotBarberIdForModal('');
@@ -275,6 +357,7 @@ export const App: React.FC = () => {
                     setSelectedDate={setSelectedDate}
                     selectedBarberId={selectedBarberId}
                     setSelectedBarberId={setSelectedBarberId}
+                    currentUser={currentUser}
                     onStatusChange={handleStatusChange}
                     onOpenCheckout={handleOpenCheckoutFromAppointment}
                     onNewAppointmentAtSlot={handleOpenNewAtSlot}
@@ -313,7 +396,12 @@ export const App: React.FC = () => {
                     activeAppointments={appointments.filter((a) => a.status !== 'cancelled')}
                     barbers={barbers}
                     sales={sales}
+                    currentShift={currentShift}
+                    isShiftOpen={isShiftOpen}
+                    currentUser={currentUser}
                     initialAppointment={posTargetAppointment}
+                    onOpenShift={handleOpenShift}
+                    onCloseShift={handleCloseShift}
                     onProcessCheckout={handleProcessCheckout}
                   />
                 )}
@@ -342,4 +430,5 @@ export const App: React.FC = () => {
     </div>
   );
 };
+
 export default App;

@@ -18,7 +18,7 @@ import {
   XCircle,
   Plus
 } from 'lucide-react';
-import { Appointment, Barber, AppointmentStatus } from '../types';
+import { Appointment, Barber, AppointmentStatus, User } from '../types';
 
 interface AgendaViewProps {
   appointments: Appointment[];
@@ -27,6 +27,7 @@ interface AgendaViewProps {
   setSelectedDate: (date: string) => void;
   selectedBarberId: string;
   setSelectedBarberId: (id: string) => void;
+  currentUser?: User | null;
   onStatusChange: (id: string, status: AppointmentStatus) => void;
   onOpenCheckout: (appointment: Appointment) => void;
   onNewAppointmentAtSlot: (time: string, barberId?: string) => void;
@@ -52,6 +53,7 @@ export const AgendaView: React.FC<AgendaViewProps> = ({
   setSelectedDate,
   selectedBarberId,
   setSelectedBarberId,
+  currentUser,
   onStatusChange,
   onOpenCheckout,
   onNewAppointmentAtSlot,
@@ -60,6 +62,13 @@ export const AgendaView: React.FC<AgendaViewProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [clientSearch, setClientSearch] = useState<string>('');
   const [announcement, setAnnouncement] = useState<string>('');
+
+  // SoD: Si el usuario es barbero, forzar su sillón asignado
+  useEffect(() => {
+    if (currentUser?.role === 'barber' && currentUser.barber_id) {
+      setSelectedBarberId(currentUser.barber_id);
+    }
+  }, [currentUser, setSelectedBarberId]);
 
   // Keyboard navigation shortcuts
   useEffect(() => {
@@ -354,11 +363,16 @@ export const AgendaView: React.FC<AgendaViewProps> = ({
           <select
             id="barber-select-filter"
             value={selectedBarberId}
+            disabled={currentUser?.role === 'barber'}
             onChange={(e) => setSelectedBarberId(e.target.value)}
             aria-label="Filtrar por profesional"
-            className="px-3 py-1.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f0b429]"
+            className={`px-3 py-1.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-[#f0b429] ${
+              currentUser?.role === 'barber' ? 'opacity-70 cursor-not-allowed bg-emerald-950/40 border-emerald-500/40 text-emerald-300' : ''
+            }`}
           >
-            <option value="all">💈 Todos los Sillones ({barbers.length})</option>
+            {currentUser?.role !== 'barber' && (
+              <option value="all">💈 Todos los Sillones ({barbers.length})</option>
+            )}
             {barbers.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.name} ({b.nickname || b.specialty})
@@ -390,6 +404,16 @@ export const AgendaView: React.FC<AgendaViewProps> = ({
           ))}
         </div>
       </div>
+
+      {/* SoD Notice Banner for Barbers */}
+      {currentUser?.role === 'barber' && (
+        <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2.5">
+          <Scissors className="w-4 h-4 shrink-0 text-emerald-400" />
+          <span>
+            <strong>Sillón Personal de {currentUser.full_name}:</strong> Por principio de segregación de funciones (SoD), estás visualizando únicamente tu agenda operativa asignada.
+          </span>
+        </div>
+      )}
 
       {/* 3. Multi-Barber Timeline Columns */}
       <div className="overflow-x-auto pb-4">

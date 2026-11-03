@@ -1,13 +1,18 @@
 import React, { useState } from 'react';
-import { CreditCard, QrCode, Banknote, DollarSign, CheckCircle, Printer, Share2, Sparkles, AlertCircle } from 'lucide-react';
+import { CreditCard, QrCode, Banknote, CheckCircle, Printer, Sparkles, AlertCircle, Lock, Unlock, ShieldAlert, DollarSign } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { Appointment, Barber, Sale } from '../types';
+import { Appointment, Barber, Sale, CashShift, User } from '../types';
 
 interface PosViewProps {
   activeAppointments: Appointment[];
   barbers: Barber[];
   sales: Sale[];
+  currentShift: CashShift | null;
+  isShiftOpen: boolean;
+  currentUser?: User | null;
   initialAppointment?: Appointment | null;
+  onOpenShift: (initialCash: number, notes?: string) => Promise<void>;
+  onCloseShift: (actualCounted: number, notes?: string) => Promise<{ verdict: string; difference: number }>;
   onProcessCheckout: (data: {
     appointment_id?: string;
     client_name: string;
@@ -18,6 +23,7 @@ interface PosViewProps {
     tip?: number;
     total: number;
     payment_method: string;
+    qr_reference_code?: string;
     notes?: string;
   }) => Promise<Sale>;
 }
@@ -26,7 +32,12 @@ export const PosView: React.FC<PosViewProps> = ({
   activeAppointments,
   barbers,
   sales,
+  currentShift,
+  isShiftOpen,
+  currentUser,
   initialAppointment,
+  onOpenShift,
+  onCloseShift,
   onProcessCheckout,
 }) => {
   const [selectedAptId, setSelectedAptId] = useState<string>(initialAppointment?.id || '');
@@ -36,15 +47,26 @@ export const PosView: React.FC<PosViewProps> = ({
   const [productAmount, setProductAmount] = useState<number>(0);
   const [tipAmount, setTipAmount] = useState<number>(5);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'qr_simple' | 'card'>('qr_simple');
+  const [qrReferenceCode, setQrReferenceCode] = useState('');
   const [cashReceived, setCashReceived] = useState<number>(60);
   const [notes, setNotes] = useState('');
 
   const [completedSale, setCompletedSale] = useState<Sale | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Shift Modals
+  const [isOpenShiftModalOpen, setIsOpenShiftModalOpen] = useState(false);
+  const [isCloseShiftModalOpen, setIsCloseShiftModalOpen] = useState(false);
+  const [initialCashInput, setInitialCashInput] = useState<number>(200);
+  const [actualCashCountedInput, setActualCashCountedInput] = useState<number>(0);
+  const [shiftNotesInput, setShiftNotesInput] = useState<string>('');
+  const [closeShiftVerdict, setCloseShiftVerdict] = useState<{ verdict: string; difference: number } | null>(null);
 
   // When selected appointment changes
   const handleAppointmentSelect = (aptId: string) => {
     setSelectedAptId(aptId);
+    setErrorMsg(null);
     if (!aptId) return;
     const apt = activeAppointments.find((a) => a.id === aptId);
     if (apt) {
@@ -60,8 +82,28 @@ export const PosView: React.FC<PosViewProps> = ({
   const total = subtotal + tipAmount;
   const changeDue = Math.max(0, cashReceived - total);
 
+  // Check SoD Permissions
+  const isBarberUser = currentUser?.role === 'barber';
+
   const handleSubmitCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMsg(null);
+
+    if (isBarberUser) {
+      setErrorMsg('Segregación de Funciones (SoD): Tu rol actual es Barbero. Solo Recepción o Administrador pueden cobrar.');
+      return;
+    }
+
+    if (!isShiftOpen) {
+      setErrorMsg('Caja Cerrada: Debe abrir un turno de caja antes de registrar cobros.');
+      return;
+    }
+
+    if (paymentMethod === 'qr_simple' && !qrReferenceCode.trim()) {
+      setErrorMsg('Normativa QR Simple: El Código de Autorización/Referencia bancaria es obligatorio.');
+      return;
+    }
+
     if (!clientName.trim() || total <= 0) return;
 
     setIsProcessing(true);
@@ -69,30 +111,50 @@ export const PosView: React.FC<PosViewProps> = ({
       const sale = await onProcessCheckout({
         appointment_id: selectedAptId || undefined,
         client_name: clientName,
-        barber_id: currentBarber.id,
-        barber_name: currentBarber.name,
+        barber_id: currentBarber?.id || 'bar-1',
+        barber_name: currentBarber?.name || 'Alex Mendoza',
         services_total: serviceAmount,
         products_total: productAmount,
         tip: tipAmount,
         total: total,
         payment_method: paymentMethod,
+        qr_reference_code: paymentMethod === 'qr_simple' ? qrReferenceCode.trim() : undefined,
         notes: notes || undefined,
       });
 
       setCompletedSale(sale);
 
-      // Confetti celebration!
       confetti({
         particleCount: 80,
         spread: 70,
         origin: { y: 0.6 },
         colors: ['#f0b429', '#1a4fd6', '#60a5fa', '#ffffff'],
       });
-    } catch (err) {
-      console.error(err);
-      alert('Error al registrar la venta en caja.');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Error al registrar la venta en caja.');
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  const handleOpenShiftSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await onOpenShift(initialCashInput, shiftNotesInput);
+      setIsOpenShiftModalOpen(false);
+      setShiftNotesInput('');
+    } catch (err: any) {
+      alert(err.message || 'Error al abrir caja');
+    }
+  };
+
+  const handleCloseShiftSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const result = await onCloseShift(actualCashCountedInput, shiftNotesInput);
+      setCloseShiftVerdict(result);
+    } catch (err: any) {
+      alert(err.message || 'Error al cerrar caja');
     }
   };
 
@@ -104,363 +166,562 @@ export const PosView: React.FC<PosViewProps> = ({
     setProductAmount(0);
     setTipAmount(5);
     setCashReceived(60);
+    setQrReferenceCode('');
     setNotes('');
-  };
-
-  const printReceipt = () => {
-    window.print();
+    setErrorMsg(null);
   };
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="p-4 rounded-2xl bg-[#0d2347]/80 border border-[#3b82f6]/20 flex items-center justify-between">
-        <div>
-          <h2 className="font-heading font-extrabold text-xl text-white flex items-center gap-2">
-            <CreditCard className="w-5 h-5 text-[#f0b429]" />
-            Caja & Punto de Venta (POS)
-          </h2>
-          <p className="text-xs text-[#94a3b8] mt-1">
-            Cobro rápido de citas finalizadas, propinas de barberos y pagos con QR Simple Bolivia.
-          </p>
+      {/* Caja / Shift Control Banner */}
+      <div className={`p-4 rounded-2xl border flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all ${
+        isShiftOpen
+          ? 'bg-[#0d2347]/90 border-emerald-500/30'
+          : 'bg-rose-950/40 border-rose-500/30'
+      }`}>
+        <div className="flex items-center gap-3">
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center border ${
+            isShiftOpen ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400' : 'bg-rose-500/10 border-rose-500/40 text-rose-400'
+          }`}>
+            {isShiftOpen ? <Unlock className="w-5 h-5" /> : <Lock className="w-5 h-5" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className={`inline-block w-2 h-2 rounded-full ${isShiftOpen ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`}></span>
+              <h3 className="font-heading font-bold text-white text-base">
+                {isShiftOpen ? 'Turno de Caja Activo' : 'Caja Cerrada (Sin Turno Activo)'}
+              </h3>
+            </div>
+            <p className="text-xs text-[#94a3b8] mt-0.5">
+              {isShiftOpen
+                ? `Iniciado por ${currentShift?.opened_by_name || 'Admin'} con fondo inicial de Bs. ${currentShift?.initial_cash.toFixed(2) || '0.00'}`
+                : 'Se requiere iniciar sesión de caja para procesar cobros y emitir comprobantes.'}
+            </p>
+          </div>
         </div>
 
-        {completedSale && (
-          <button
-            onClick={handleNewCheckout}
-            className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#1a4fd6] to-[#2563eb] text-white text-xs font-semibold shadow-md shadow-[#1a4fd6]/30"
-          >
-            + Nueva Transacción
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          {isShiftOpen ? (
+            <button
+              onClick={() => {
+                setActualCashCountedInput(0);
+                setIsCloseShiftModalOpen(true);
+              }}
+              className="px-4 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center gap-2 transition-all"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>Cerrar Caja (Arqueo Ciego)</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => setIsOpenShiftModalOpen(true)}
+              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-2 shadow-lg shadow-emerald-600/30 transition-all"
+            >
+              <Unlock className="w-3.5 h-3.5" />
+              <span>Abrir Turno de Caja</span>
+            </button>
+          )}
+        </div>
       </div>
 
-      {completedSale ? (
-        /* Digital Receipt View */
-        <div className="max-w-md mx-auto p-6 rounded-2xl bg-[#0d2347] border-2 border-[#f0b429]/40 shadow-2xl relative text-center">
-          <div className="w-14 h-14 rounded-2xl bg-[#0a1628] border border-[#f0b429] mx-auto flex items-center justify-center mb-3">
-            <CheckCircle className="w-8 h-8 text-[#f0b429]" />
-          </div>
-
-          <h3 className="font-heading font-extrabold text-2xl text-white mb-1">
-            ¡Cobro Exitoso!
-          </h3>
-          <p className="text-xs text-[#60a5fa] mb-6">
-            Comprobante Oficial • ApoloDigital Barber
-          </p>
-
-          <div className="p-4 rounded-xl bg-[#0a1628] border border-[#3b82f6]/20 text-left space-y-3 mb-6 text-xs">
-            <div className="flex justify-between border-b border-[#3b82f6]/15 pb-2">
-              <span className="text-[#94a3b8]">Transacción:</span>
-              <span className="font-mono text-white">{completedSale.id}</span>
-            </div>
-            <div className="flex justify-between border-b border-[#3b82f6]/15 pb-2">
-              <span className="text-[#94a3b8]">Cliente:</span>
-              <span className="font-bold text-white">{completedSale.client_name}</span>
-            </div>
-            <div className="flex justify-between border-b border-[#3b82f6]/15 pb-2">
-              <span className="text-[#94a3b8]">Barbero Asignado:</span>
-              <span className="text-[#60a5fa]">{completedSale.barber_name}</span>
-            </div>
-            <div className="flex justify-between border-b border-[#3b82f6]/15 pb-2">
-              <span className="text-[#94a3b8]">Método de Pago:</span>
-              <span className="capitalize font-semibold text-[#f0b429]">
-                {completedSale.payment_method === 'qr_simple'
-                  ? 'QR Simple Bolivia'
-                  : completedSale.payment_method === 'cash'
-                  ? 'Efectivo'
-                  : 'Tarjeta'}
-              </span>
-            </div>
-            <div className="flex justify-between border-b border-[#3b82f6]/15 pb-2">
-              <span className="text-[#94a3b8]">Servicio:</span>
-              <span className="text-white">{completedSale.subtotal} Bs.</span>
-            </div>
-            {completedSale.tip > 0 && (
-              <div className="flex justify-between border-b border-[#3b82f6]/15 pb-2">
-                <span className="text-[#94a3b8]">Propina Barbero:</span>
-                <span className="text-[#fbbf24]">+{completedSale.tip} Bs.</span>
-              </div>
-            )}
-            <div className="flex justify-between pt-1 text-sm font-extrabold text-white">
-              <span className="text-[#60a5fa]">TOTAL PAGADO:</span>
-              <span className="text-[#f0b429] text-base">{completedSale.total} Bs.</span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={printReceipt}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-[#102a54] hover:bg-[#1a4fd6]/40 text-white text-xs font-semibold border border-[#3b82f6]/30 transition-all"
-            >
-              <Printer className="w-4 h-4 text-[#60a5fa]" />
-              <span>Imprimir Ticket</span>
-            </button>
-            <button
-              onClick={handleNewCheckout}
-              className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-[#1a4fd6] to-[#2563eb] text-white text-xs font-bold shadow-md shadow-[#1a4fd6]/30"
-            >
-              Siguiente Cobro
-            </button>
+      {/* SoD Warning for Barbers */}
+      {isBarberUser && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-3 text-amber-300 text-xs">
+          <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-bold text-sm text-amber-200">Segregación de Funciones (SoD) Aplicada</p>
+            <p className="mt-0.5 text-amber-300/90">
+              Has iniciado sesión con el rol <strong>Barbero</strong>. Por normativa de auditoría y prevención de fugas de efectivo, los profesionales no pueden cobrar sus propios servicios. El cobro debe ser realizado por Recepción.
+            </p>
           </div>
         </div>
-      ) : (
-        /* Form POS Checkout */
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column: Form & Selection */}
-          <div className="lg:col-span-2 space-y-5">
-            {/* Quick appointment selector */}
-            <div className="p-4 rounded-2xl bg-[#0d2347]/70 border border-[#3b82f6]/20">
-              <label className="block text-xs font-bold text-[#60a5fa] uppercase tracking-wider mb-2">
-                1. Seleccionar Cita en Curso / Pendiente de Cobro
-              </label>
-              <select
-                value={selectedAptId}
-                onChange={(e) => handleAppointmentSelect(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-sm focus:outline-none focus:border-[#60a5fa]"
-              >
-                <option value="">-- Cobro Libre / Cliente Sin Cita Previa (Walk-in) --</option>
-                {activeAppointments.map((apt) => (
-                  <option key={apt.id} value={apt.id}>
-                    {apt.time} • {apt.client_name} • {apt.service_name} ({apt.price} Bs.) - {apt.barber_name}
-                  </option>
-                ))}
-              </select>
+      )}
+
+      {/* POS Workspace Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Column: Form & Selector */}
+        <div className="lg:col-span-7 space-y-6">
+          {completedSale ? (
+            /* Completed Receipt View */
+            <div className="p-6 rounded-2xl bg-[#0d2347]/90 border border-emerald-500/40 text-center space-y-5">
+              <div className="w-16 h-16 rounded-full bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center mx-auto text-emerald-400">
+                <CheckCircle className="w-8 h-8" />
+              </div>
+              <div>
+                <h3 className="font-heading font-extrabold text-2xl text-white">¡Cobro Registrado con Éxito!</h3>
+                <p className="text-sm text-[#94a3b8] mt-1">
+                  Venta <span className="font-mono text-emerald-400 font-bold">{completedSale.id}</span>
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-[#0a1628]/80 border border-[#3b82f6]/20 text-left space-y-2 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-[#94a3b8]">Cliente:</span>
+                  <span className="text-white font-medium">{completedSale.client_name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#94a3b8]">Barbero:</span>
+                  <span className="text-white font-medium">{completedSale.barber_name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#94a3b8]">Método de Pago:</span>
+                  <span className="text-white capitalize">{completedSale.payment_method.replace('_', ' ')}</span>
+                </div>
+                {completedSale.qr_reference_code && (
+                  <div className="flex justify-between text-amber-300">
+                    <span>Referencia QR Simple:</span>
+                    <span className="font-mono font-bold">{completedSale.qr_reference_code}</span>
+                  </div>
+                )}
+                <div className="border-t border-[#3b82f6]/20 pt-2 flex justify-between font-bold text-sm text-white">
+                  <span>Total Cobrado:</span>
+                  <span className="text-[#f0b429]">Bs. {completedSale.total.toFixed(2)}</span>
+                </div>
+              </div>
+
+              <div className="flex gap-3 justify-center">
+                <button
+                  onClick={() => window.print()}
+                  className="px-4 py-2.5 rounded-xl bg-[#1a4fd6] hover:bg-[#2563eb] text-white text-xs font-semibold flex items-center gap-2"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Imprimir Recibo</span>
+                </button>
+                <button
+                  onClick={handleNewCheckout}
+                  className="px-4 py-2.5 rounded-xl bg-[#0d2347] hover:bg-[#1a386b] border border-[#3b82f6]/30 text-white text-xs font-semibold"
+                >
+                  Nuevo Cobro
+                </button>
+              </div>
             </div>
+          ) : (
+            /* Checkout Form */
+            <form onSubmit={handleSubmitCheckout} className="p-6 rounded-2xl bg-[#0d2347]/80 border border-[#3b82f6]/20 space-y-5">
+              {errorMsg && (
+                <div className="p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                  <span>{errorMsg}</span>
+                </div>
+              )}
 
-            {/* Customer & Barber details */}
-            <div className="p-5 rounded-2xl bg-[#0d2347]/70 border border-[#3b82f6]/20 space-y-4">
-              <h3 className="font-heading font-bold text-sm text-white">
-                2. Datos del Cliente & Especialista
-              </h3>
+              {/* Pending Appointments Dropdown */}
+              <div>
+                <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">
+                  Vincular a Cita Pendiente de Cobro
+                </label>
+                <select
+                  value={selectedAptId}
+                  onChange={(e) => handleAppointmentSelect(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs focus:outline-none focus:border-[#f0b429]"
+                >
+                  <option value="">-- Cobro manual express (Sin cita previa) --</option>
+                  {activeAppointments.map((apt) => (
+                    <option key={apt.id} value={apt.id}>
+                      {apt.time} - {apt.client_name} ({apt.service_name} • Bs. {apt.price}) [{apt.barber_name}]
+                    </option>
+                  ))}
+                </select>
+              </div>
 
+              {/* Client & Barber */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-[#c8deff] mb-1">Nombre del Cliente</label>
+                  <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">Nombre del Cliente *</label>
                   <input
                     type="text"
                     required
                     value={clientName}
                     onChange={(e) => setClientName(e.target.value)}
-                    placeholder="Ej: Marcelo Suárez"
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-sm focus:outline-none focus:border-[#60a5fa]"
+                    placeholder="Ej. Juan Pablo Claure"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs focus:outline-none focus:border-[#f0b429]"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-xs font-semibold text-[#c8deff] mb-1">Barbero que atendió</label>
+                  <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">Barbero que atendió *</label>
                   <select
                     value={selectedBarberId}
                     onChange={(e) => setSelectedBarberId(e.target.value)}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-sm focus:outline-none focus:border-[#60a5fa]"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs focus:outline-none focus:border-[#f0b429]"
                   >
                     {barbers.map((b) => (
                       <option key={b.id} value={b.id}>
-                        {b.name} ({b.nickname || b.specialty})
+                        {b.name} ({b.specialty})
                       </option>
                     ))}
                   </select>
                 </div>
               </div>
-            </div>
 
-            {/* Pricing items */}
-            <div className="p-5 rounded-2xl bg-[#0d2347]/70 border border-[#3b82f6]/20 space-y-4">
-              <h3 className="font-heading font-bold text-sm text-white">
-                3. Desglose de Servicios & Productos
-              </h3>
-
+              {/* Amounts Breakdown */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-[#c8deff] mb-1">Servicio de Barbería (Bs.)</label>
+                  <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">Total Servicios (Bs.)</label>
                   <input
                     type="number"
                     min="0"
-                    step="5"
+                    step="0.5"
                     value={serviceAmount}
-                    onChange={(e) => setServiceAmount(Number(e.target.value))}
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-sm font-bold text-[#f0b429] focus:outline-none"
+                    onChange={(e) => setServiceAmount(parseFloat(e.target.value) || 0)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs focus:outline-none focus:border-[#f0b429]"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-xs font-semibold text-[#c8deff] mb-1">Productos / Pomada (Bs.)</label>
+                  <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">Productos / Cera (Bs.)</label>
                   <input
                     type="number"
                     min="0"
-                    step="5"
+                    step="0.5"
                     value={productAmount}
-                    onChange={(e) => setProductAmount(Number(e.target.value))}
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-sm focus:outline-none"
+                    onChange={(e) => setProductAmount(parseFloat(e.target.value) || 0)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs focus:outline-none focus:border-[#f0b429]"
                   />
                 </div>
-
                 <div>
-                  <label className="block text-xs font-semibold text-[#c8deff] mb-1">Propina para Barbero (Bs.)</label>
-                  <div className="flex items-center gap-1.5">
-                    {[0, 5, 10].map((val) => (
-                      <button
-                        key={val}
-                        type="button"
-                        onClick={() => setTipAmount(val)}
-                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                          tipAmount === val
-                            ? 'bg-[#f0b429] text-[#0a1628]'
-                            : 'bg-[#102a54] text-[#94a3b8] hover:text-white'
-                        }`}
-                      >
-                        +{val}
-                      </button>
-                    ))}
-                    <input
-                      type="number"
-                      min="0"
-                      value={tipAmount}
-                      onChange={(e) => setTipAmount(Number(e.target.value))}
-                      className="w-16 px-2 py-1 rounded-lg bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs font-bold text-center"
-                    />
-                  </div>
+                  <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">Propina Barbero (Bs.)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={tipAmount}
+                    onChange={(e) => setTipAmount(parseFloat(e.target.value) || 0)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs focus:outline-none focus:border-[#f0b429]"
+                  />
                 </div>
               </div>
-            </div>
 
-            {/* Payment Method Selector */}
-            <div className="p-5 rounded-2xl bg-[#0d2347]/70 border border-[#3b82f6]/20 space-y-4">
-              <h3 className="font-heading font-bold text-sm text-white">
-                4. Método de Pago
-              </h3>
-
-              <div className="grid grid-cols-3 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod('qr_simple')}
-                  className={`p-4 rounded-xl border flex flex-col items-center gap-2 transition-all ${
-                    paymentMethod === 'qr_simple'
-                      ? 'bg-gradient-to-br from-[#1a4fd6]/40 to-[#102a54] border-[#f0b429] shadow-lg shadow-[#f0b429]/15'
-                      : 'bg-[#0a1628]/60 border-[#3b82f6]/20 text-[#94a3b8] hover:text-white'
-                  }`}
-                >
-                  <QrCode className="w-6 h-6 text-[#f0b429]" />
-                  <span className="text-xs font-bold text-white">QR Simple</span>
-                  <span className="text-[10px] text-[#60a5fa]">Banco Unión / BCP</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod('cash')}
-                  className={`p-4 rounded-xl border flex flex-col items-center gap-2 transition-all ${
-                    paymentMethod === 'cash'
-                      ? 'bg-gradient-to-br from-[#1a4fd6]/40 to-[#102a54] border-[#f0b429] shadow-lg shadow-[#f0b429]/15'
-                      : 'bg-[#0a1628]/60 border-[#3b82f6]/20 text-[#94a3b8] hover:text-white'
-                  }`}
-                >
-                  <Banknote className="w-6 h-6 text-emerald-400" />
-                  <span className="text-xs font-bold text-white">Efectivo</span>
-                  <span className="text-[10px] text-[#94a3b8]">En mano</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod('card')}
-                  className={`p-4 rounded-xl border flex flex-col items-center gap-2 transition-all ${
-                    paymentMethod === 'card'
-                      ? 'bg-gradient-to-br from-[#1a4fd6]/40 to-[#102a54] border-[#f0b429] shadow-lg shadow-[#f0b429]/15'
-                      : 'bg-[#0a1628]/60 border-[#3b82f6]/20 text-[#94a3b8] hover:text-white'
-                  }`}
-                >
-                  <CreditCard className="w-6 h-6 text-[#60a5fa]" />
-                  <span className="text-xs font-bold text-white">Tarjeta / POS</span>
-                  <span className="text-[10px] text-[#94a3b8]">Débito / Crédito</span>
-                </button>
+              {/* Payment Methods */}
+              <div>
+                <label className="block text-xs font-semibold text-[#94a3b8] mb-2">Método de Pago</label>
+                <div className="grid grid-cols-3 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentMethod('qr_simple')}
+                    className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 text-xs transition-all ${
+                      paymentMethod === 'qr_simple'
+                        ? 'bg-gradient-to-br from-[#1a4fd6] to-[#0d2347] border-[#f0b429] text-white shadow-md'
+                        : 'bg-[#0a1628] border-[#3b82f6]/20 text-[#94a3b8]'
+                    }`}
+                  >
+                    <QrCode className="w-5 h-5 text-[#f0b429]" />
+                    <span className="font-semibold">QR Simple</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentMethod('cash')}
+                    className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 text-xs transition-all ${
+                      paymentMethod === 'cash'
+                        ? 'bg-gradient-to-br from-[#1a4fd6] to-[#0d2347] border-[#f0b429] text-white shadow-md'
+                        : 'bg-[#0a1628] border-[#3b82f6]/20 text-[#94a3b8]'
+                    }`}
+                  >
+                    <Banknote className="w-5 h-5 text-emerald-400" />
+                    <span className="font-semibold">Efectivo</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentMethod('card')}
+                    className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 text-xs transition-all ${
+                      paymentMethod === 'card'
+                        ? 'bg-gradient-to-br from-[#1a4fd6] to-[#0d2347] border-[#f0b429] text-white shadow-md'
+                        : 'bg-[#0a1628] border-[#3b82f6]/20 text-[#94a3b8]'
+                    }`}
+                  >
+                    <CreditCard className="w-5 h-5 text-[#60a5fa]" />
+                    <span className="font-semibold">Tarjeta</span>
+                  </button>
+                </div>
               </div>
 
-              {/* Cash Calculator */}
+              {/* QR Reference Code Input (Anti-Fraude OWASP) */}
+              {paymentMethod === 'qr_simple' && (
+                <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-amber-300">
+                      Código de Autorización / Referencia QR Simple *
+                    </label>
+                    <span className="text-[10px] text-amber-400/80">Validación Anti-Fraude</span>
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    value={qrReferenceCode}
+                    onChange={(e) => setQrReferenceCode(e.target.value)}
+                    placeholder="Ej. BNB-982341 o Código de Autorización del Banco"
+                    className="w-full px-3.5 py-2 rounded-lg bg-[#0a1628] border border-amber-500/40 text-amber-200 text-xs font-mono focus:outline-none focus:border-amber-400"
+                  />
+                  <p className="text-[11px] text-amber-300/70">
+                    Ingresa los dígitos de autorización que aparecen en el comprobante del cliente. El sistema verifica que no haya sido utilizado previamente.
+                  </p>
+                </div>
+              )}
+
+              {/* Cash Change Calculator */}
               {paymentMethod === 'cash' && (
-                <div className="p-3.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/20 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-[#c8deff]">Monto Recibido:</span>
+                <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between">
+                  <div>
+                    <label className="text-xs text-emerald-300 block">Efectivo Recibido (Bs.)</label>
                     <input
                       type="number"
                       value={cashReceived}
-                      onChange={(e) => setCashReceived(Number(e.target.value))}
-                      className="w-24 px-3 py-1.5 rounded-lg bg-[#102a54] border border-[#3b82f6]/30 text-white font-bold text-sm text-center"
+                      onChange={(e) => setCashReceived(parseFloat(e.target.value) || 0)}
+                      className="w-24 mt-1 px-2.5 py-1.5 rounded-lg bg-[#0a1628] border border-emerald-500/40 text-white text-xs font-mono"
                     />
-                    <span className="text-xs text-[#f0b429]">Bs.</span>
                   </div>
-
                   <div className="text-right">
-                    <span className="text-xs text-[#94a3b8]">Cambio / Vuelto:</span>
-                    <div className="font-heading font-extrabold text-base text-emerald-400">
-                      {changeDue} Bs.
-                    </div>
+                    <span className="text-xs text-[#94a3b8]">Cambio a devolver:</span>
+                    <p className="font-heading font-black text-lg text-emerald-400">Bs. {changeDue.toFixed(2)}</p>
                   </div>
                 </div>
               )}
+
+              {/* Submit Checkout Button */}
+              <button
+                type="submit"
+                disabled={isProcessing || isBarberUser || !isShiftOpen}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#f0b429] to-[#fbbf24] hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed text-[#0a1628] font-heading font-extrabold text-sm shadow-lg shadow-[#f0b429]/25 flex items-center justify-center gap-2 transition-all active:scale-98"
+              >
+                {isProcessing ? (
+                  <span>Procesando cobro en caja...</span>
+                ) : (
+                  <>
+                    <CheckCircle className="w-5 h-5" />
+                    <span>Confirmar y Cobrar Bs. {total.toFixed(2)}</span>
+                  </>
+                )}
+              </button>
+            </form>
+          )}
+        </div>
+
+        {/* Right Column: Live Summary & Shift Info */}
+        <div className="lg:col-span-5 space-y-6">
+          {/* Ticket Preview */}
+          <div className="p-5 rounded-2xl bg-[#0a1628] border border-[#3b82f6]/20 space-y-4">
+            <div className="flex items-center justify-between border-b border-[#3b82f6]/20 pb-3">
+              <h3 className="font-heading font-bold text-white text-sm">Resumen de Venta</h3>
+              <span className="text-[11px] text-[#f0b429] font-medium">Pre-factura</span>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between text-[#94a3b8]">
+                <span>Servicios:</span>
+                <span className="text-white font-mono">Bs. {serviceAmount.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-[#94a3b8]">
+                <span>Productos:</span>
+                <span className="text-white font-mono">Bs. {productAmount.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-[#94a3b8]">
+                <span>Propina asignada:</span>
+                <span className="text-white font-mono">Bs. {tipAmount.toFixed(2)}</span>
+              </div>
+              <div className="border-t border-[#3b82f6]/20 pt-2 flex justify-between font-heading font-extrabold text-base text-white">
+                <span>Total a Cobrar:</span>
+                <span className="text-[#f0b429]">Bs. {total.toFixed(2)}</span>
+              </div>
+            </div>
+
+            {/* Simulated Commission Snapshot */}
+            <div className="p-3 rounded-xl bg-[#0d2347]/60 border border-[#3b82f6]/20 text-[11px] text-[#94a3b8] space-y-1">
+              <div className="flex justify-between">
+                <span>Barbero:</span>
+                <span className="text-white font-medium">{currentBarber?.name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Comisión snapshot:</span>
+                <span className="text-emerald-400 font-mono">
+                  {((currentBarber?.commission_rate || 0.5) * 100).toFixed(0)}% (Bs. {(serviceAmount * (currentBarber?.commission_rate || 0.5)).toFixed(2)})
+                </span>
+              </div>
             </div>
           </div>
 
-          {/* Right Column: Order Summary & Interactive QR */}
-          <div className="space-y-5">
-            <div className="p-6 rounded-2xl bg-[#0d2347] border border-[#3b82f6]/30 shadow-xl space-y-4">
-              <h3 className="font-heading font-extrabold text-lg text-white border-b border-[#3b82f6]/20 pb-3">
-                Resumen de Cobro
-              </h3>
+          {/* Recent Sales for this shift */}
+          <div className="p-5 rounded-2xl bg-[#0d2347]/80 border border-[#3b82f6]/20 space-y-3">
+            <h3 className="font-heading font-bold text-white text-xs uppercase tracking-wider text-[#94a3b8]">
+              Ventas Recientes del Día ({sales.length})
+            </h3>
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {sales.slice(0, 5).map((s) => (
+                <div key={s.id} className="p-2.5 rounded-xl bg-[#0a1628]/80 border border-[#3b82f6]/15 flex items-center justify-between text-xs">
+                  <div>
+                    <p className="text-white font-medium">{s.client_name}</p>
+                    <p className="text-[10px] text-[#94a3b8]">
+                      {s.barber_name} • {s.payment_method.toUpperCase()}
+                    </p>
+                  </div>
+                  <span className="font-heading font-bold text-[#f0b429]">Bs. {s.total.toFixed(2)}</span>
+                </div>
+              ))}
+              {sales.length === 0 && (
+                <p className="text-xs text-[#94a3b8] text-center py-4">No hay ventas registradas aún hoy.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
 
-              <div className="space-y-2 text-xs">
-                <div className="flex justify-between text-[#c8deff]">
-                  <span>Servicio en sillón:</span>
-                  <span className="font-semibold text-white">{serviceAmount} Bs.</span>
-                </div>
-                {productAmount > 0 && (
-                  <div className="flex justify-between text-[#c8deff]">
-                    <span>Productos adicionales:</span>
-                    <span className="font-semibold text-white">+{productAmount} Bs.</span>
-                  </div>
-                )}
-                {tipAmount > 0 && (
-                  <div className="flex justify-between text-[#fbbf24]">
-                    <span>Propina ({currentBarber.name}):</span>
-                    <span className="font-bold">+{tipAmount} Bs.</span>
-                  </div>
-                )}
-                <div className="pt-3 border-t border-[#3b82f6]/20 flex items-center justify-between">
-                  <span className="font-heading font-bold text-sm text-[#60a5fa]">TOTAL A COBRAR:</span>
-                  <span className="font-heading font-extrabold text-2xl text-[#f0b429]">
-                    {total} <span className="text-sm">Bs.</span>
-                  </span>
-                </div>
+      {/* Modal: Apertura de Turno de Caja */}
+      {isOpenShiftModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#0d2347] border border-[#3b82f6]/30 rounded-2xl p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                <Unlock className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-heading font-bold text-lg text-white">Apertura de Turno de Caja</h3>
+                <p className="text-xs text-[#94a3b8]">Ingresa el fondo fijo de efectivo inicial en gaveta.</p>
+              </div>
+            </div>
+
+            <form onSubmit={handleOpenShiftSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">Fondo Inicial (Bs.) *</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="5"
+                  required
+                  value={initialCashInput}
+                  onChange={(e) => setInitialCashInput(parseFloat(e.target.value) || 0)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white font-mono text-base focus:outline-none focus:border-emerald-400"
+                />
               </div>
 
-              {/* QR Simple Bolivia Graphic */}
-              {paymentMethod === 'qr_simple' && (
-                <div className="p-4 rounded-xl bg-[#0a1628] border border-[#f0b429]/40 text-center space-y-2">
-                  <div className="text-[11px] font-bold text-[#f0b429] uppercase tracking-wider">
-                    QR Simple Bolivia • Interoperable
-                  </div>
-                  {/* Generated QR Mock pattern */}
-                  <div className="w-36 h-36 mx-auto bg-white p-2 rounded-xl flex items-center justify-center shadow-lg">
-                    <img
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=APOLODIGITAL-BARBER-BOB-${total}-BS`}
-                      alt="QR Simple"
-                      className="w-full h-full object-contain"
-                    />
-                  </div>
-                  <div className="text-[10px] text-[#94a3b8]">
-                    Escanea desde cualquier app bancaria de Bolivia (Banco Unión, BCP, BNB, etc.)
+              <div>
+                <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">Notas de Apertura (Opcional)</label>
+                <input
+                  type="text"
+                  value={shiftNotesInput}
+                  onChange={(e) => setShiftNotesInput(e.target.value)}
+                  placeholder="Ej. Billetes de 20 y 10 para cambio"
+                  className="w-full px-3.5 py-2 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs"
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsOpenShiftModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs text-[#94a3b8] hover:text-white"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-600/30"
+                >
+                  Confirmar Apertura
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Arqueo Ciego y Cierre de Caja (Blind Reconciliation) */}
+      {isCloseShiftModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#0d2347] border border-[#3b82f6]/30 rounded-2xl p-6 space-y-5 shadow-2xl">
+            {closeShiftVerdict ? (
+              /* Verdict screen */
+              <div className="text-center space-y-4">
+                <div className={`w-14 h-14 rounded-full mx-auto flex items-center justify-center ${
+                  closeShiftVerdict.difference === 0
+                    ? 'bg-emerald-500/15 border border-emerald-500/40 text-emerald-400'
+                    : 'bg-amber-500/15 border border-amber-500/40 text-amber-400'
+                }`}>
+                  <CheckCircle className="w-7 h-7" />
+                </div>
+                <div>
+                  <h3 className="font-heading font-extrabold text-xl text-white">Arqueo de Caja Finalizado</h3>
+                  <p className="text-sm font-bold text-amber-300 mt-1">{closeShiftVerdict.verdict}</p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/20 text-xs text-left space-y-1.5 font-mono">
+                  <div className="flex justify-between text-[#94a3b8]">
+                    <span>Diferencia contable:</span>
+                    <span className={closeShiftVerdict.difference < 0 ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
+                      Bs. {closeShiftVerdict.difference.toFixed(2)}
+                    </span>
                   </div>
                 </div>
-              )}
 
-              {/* Final Confirm Button */}
-              <button
-                onClick={handleSubmitCheckout}
-                disabled={isProcessing || !clientName.trim()}
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-500 via-emerald-600 to-teal-600 hover:brightness-110 disabled:opacity-50 text-white font-heading font-bold text-sm shadow-xl shadow-emerald-500/30 flex items-center justify-center gap-2 transition-all transform active:scale-95"
-              >
-                <CheckCircle className="w-4 h-4" />
-                <span>{isProcessing ? 'Procesando...' : `Confirmar Cobro • ${total} Bs.`}</span>
-              </button>
-            </div>
+                <button
+                  onClick={() => {
+                    setIsCloseShiftModalOpen(false);
+                    setCloseShiftVerdict(null);
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-[#1a4fd6] text-white text-xs font-bold"
+                >
+                  Entendido y Finalizar
+                </button>
+              </div>
+            ) : (
+              /* Blind Count Form */
+              <>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400">
+                    <Lock className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-heading font-bold text-lg text-white">Arqueo Ciego de Caja</h3>
+                    <p className="text-xs text-[#94a3b8]">Procedimiento de auditoría sin revelación de saldo teórico.</p>
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs">
+                  Por normativa de seguridad OWASP, cuenta físicamente todos los billetes y monedas en la gaveta e introduce el total exacto. El sistema calculará la discrepancia de forma inmutable.
+                </div>
+
+                <form onSubmit={handleCloseShiftSubmit} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">
+                      Efectivo Total Contado Físicamente (Bs.) *
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      required
+                      value={actualCashCountedInput}
+                      onChange={(e) => setActualCashCountedInput(parseFloat(e.target.value) || 0)}
+                      placeholder="0.00"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white font-mono text-lg focus:outline-none focus:border-amber-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-[#94a3b8] mb-1.5">Observaciones de Cierre</label>
+                    <input
+                      type="text"
+                      value={shiftNotesInput}
+                      onChange={(e) => setShiftNotesInput(e.target.value)}
+                      placeholder="Ej. Billetes deteriorados o redondeos"
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#0a1628] border border-[#3b82f6]/30 text-white text-xs"
+                    />
+                  </div>
+
+                  <div className="flex justify-end gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsCloseShiftModalOpen(false)}
+                      className="px-4 py-2 rounded-xl text-xs text-[#94a3b8] hover:text-white"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 text-black text-xs font-bold shadow-lg shadow-amber-500/25"
+                    >
+                      Procesar Cierre y Arqueo
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
           </div>
         </div>
       )}

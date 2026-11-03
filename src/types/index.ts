@@ -1,4 +1,43 @@
 export type AppointmentStatus = 'confirmed' | 'in_progress' | 'completed' | 'cancelled' | 'no_show';
+export type UserRole = 'owner' | 'admin' | 'barber' | 'client';
+
+export interface User {
+  id: string;
+  email: string;
+  full_name: string;
+  role: UserRole;
+  tenant_id: string;
+  barber_id?: string;
+  organization?: {
+    id: string;
+    name: string;
+    slug: string;
+    address?: string;
+    phone?: string;
+    currency: string;
+  };
+}
+
+export interface CashShift {
+  id: string;
+  tenant_id: string;
+  opened_by_user_id: string;
+  opened_by_name: string;
+  opened_at: string;
+  initial_cash: number;
+  closed_by_user_id?: string;
+  closed_by_name?: string;
+  closed_at?: string;
+  status: 'open' | 'closed';
+  system_cash_sales: number;
+  system_qr_sales: number;
+  system_total_sales: number;
+  expected_cash_in_drawer: number;
+  actual_cash_counted: number;
+  difference: number;
+  notes?: string;
+  sales_count?: number;
+}
 
 export interface Service {
   id: string;
@@ -54,6 +93,8 @@ export interface Appointment {
 
 export interface Sale {
   id: string;
+  tenant_id?: string;
+  cash_shift_id?: string;
   appointment_id?: string;
   client_name: string;
   barber_id: string;
@@ -62,6 +103,10 @@ export interface Sale {
   tip: number;
   total: number;
   payment_method: 'cash' | 'qr_simple' | 'card';
+  qr_reference_code?: string;
+  service_price_snapshot?: number;
+  commission_percentage_snapshot?: number;
+  commission_amount?: number;
   notes?: string;
   created_at: string;
 }
@@ -70,6 +115,7 @@ export interface DashboardMetrics {
   date: string;
   revenue_today: number;
   tips_today: number;
+  commissions_today?: number;
   sales_count: number;
   total_appointments: number;
   completed_appointments: number;
